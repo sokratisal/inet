@@ -37,8 +37,6 @@
 
 namespace inet {
 
-int64_t RealTimeScheduler::baseTime;
-
 Register_Class(RealTimeScheduler);
 
 RealTimeScheduler::RealTimeScheduler() : cScheduler()
@@ -68,7 +66,7 @@ void RealTimeScheduler::removeCallback(int fd, ICallback *callback)
 
 void RealTimeScheduler::startRun()
 {
-    baseTime = opp_get_monotonic_clock_usecs();
+    baseTime = opp_get_monotonic_clock_nsecs();
     // this event prevents Qtenv fast forwarding to the first event
     sim->getFES()->insert(new BeginSimulationEvent("BeginSimulation"));
 }
@@ -80,8 +78,16 @@ void RealTimeScheduler::endRun()
 
 void RealTimeScheduler::executionResumed()
 {
-    baseTime = opp_get_monotonic_clock_usecs();
-    baseTime = baseTime - sim->getSimTime().inUnit(SIMTIME_US);
+    baseTime = opp_get_monotonic_clock_nsecs();
+    baseTime = baseTime - sim->getSimTime().inUnit(SIMTIME_NS);
+}
+
+void RealTimeScheduler::advanceSimTime()
+{
+    int64_t curTime = opp_get_monotonic_clock_nsecs();
+    simtime_t t(curTime - baseTime, SIMTIME_NS);
+    if (sim->getFES()->isEmpty() || t < sim->getFES()->peekFirst()->getArrivalTime())
+        getSimulation()->setSimTime(t);
 }
 
 bool RealTimeScheduler::receiveWithTimeout(long usec)
@@ -102,9 +108,9 @@ bool RealTimeScheduler::receiveWithTimeout(long usec)
             maxfd = fdVec[i];
         FD_SET(fdVec[i], &rdfds);
     }
-    if (select(maxfd + 1, &rdfds, nullptr, nullptr, &timeout) < 0) {
+    if (select(maxfd + 1, &rdfds, nullptr, nullptr, &timeout) < 0)
         return found;
-    }
+    advanceSimTime();
     for (uint16 i = 0; i < callbackEntries.size(); i++) {
         if (!(FD_ISSET(fdVec[i], &rdfds)))
             continue;
@@ -132,7 +138,7 @@ int RealTimeScheduler::receiveUntil(int64_t targetTime)
 {
     // if there's more than 2*UI_REFRESH_TIME to wait, wait in UI_REFRESH_TIME chunks
     // in order to keep UI responsiveness by invoking getEnvir()->idle()
-    int64_t curTime = opp_get_monotonic_clock_usecs();
+    int64_t curTime = opp_get_monotonic_clock_nsecs();
 
     while ((targetTime - curTime) >= 2000000 || (targetTime - curTime) >= 2*UI_REFRESH_TIME)
     {
@@ -140,7 +146,7 @@ int RealTimeScheduler::receiveUntil(int64_t targetTime)
             return 1;
         if (getEnvir()->idle())
             return -1;
-        curTime = opp_get_monotonic_clock_usecs();
+        curTime = opp_get_monotonic_clock_nsecs();
     }
 
     // difference is now at most UI_REFRESH_TIME, do it at once
@@ -153,6 +159,7 @@ int RealTimeScheduler::receiveUntil(int64_t targetTime)
 
 cEvent *RealTimeScheduler::guessNextEvent()
 {
+    advanceSimTime();
     return sim->getFES()->peekFirst();
 }
 
@@ -170,11 +177,11 @@ cEvent *RealTimeScheduler::takeNextEvent()
     else {
         // use time of next event
         simtime_t eventSimtime = event->getArrivalTime();
-        targetTime = baseTime + eventSimtime.inUnit(SIMTIME_US);
+        targetTime = baseTime + eventSimtime.inUnit(SIMTIME_NS);
     }
 
     // if needed, wait until that time arrives
-    int64_t curTime = opp_get_monotonic_clock_usecs();
+    int64_t curTime = opp_get_monotonic_clock_nsecs();
 
     if (targetTime > curTime)
     {
@@ -198,15 +205,6 @@ cEvent *RealTimeScheduler::takeNextEvent()
 void RealTimeScheduler::putBackEvent(cEvent *event)
 {
     sim->getFES()->putBackFirst(event);
-}
-
-void RealTimeScheduler::scheduleMessage(cModule *module, cMessage *msg)
-{
-    int64_t curTime = opp_get_monotonic_clock_usecs();
-    simtime_t t(curTime - RealTimeScheduler::baseTime, SIMTIME_US);
-    // TBD assert that it's somehow not smaller than previous event's time
-    msg->setArrival(module->getId(), -1, t);
-    getSimulation()->getFES()->insert(msg);
 }
 
 } // namespace inet
